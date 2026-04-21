@@ -138,7 +138,18 @@ def build_global_stylesheet(accent: str, sidebar: str, editor_bg: str, text: str
     }}
     QToolBar QToolButton:checked,
     QToolBar QToolButton:pressed {{
-        background: {accent}55;
+        background: {hover_bg};
+        border: 1px solid {accent};
+    }}
+    /* ── Boutons bas sidebar ── */
+    QPushButton#sidebar_bottom_btn {{
+        color: white;
+        font-weight: bold;
+        font-size: 16px;
+        border: none;
+    }}
+    QPushButton#sidebar_bottom_btn:hover {{
+        background: {hover_bg};
         border: 1px solid {accent};
     }}
     /* ── Ascenseurs modernes (web-like) ── */
@@ -693,6 +704,13 @@ class DnDTreeWidget(QTreeWidget):
             if role=="ROOT_GROUP" and "Corbeille" in target.text(0):
                 event.ignore(); return
         super().dropEvent(event)
+        # Notify parent app
+        p = self.parent()
+        while p:
+            if hasattr(p, "on_tree_structure_changed"):
+                p.on_tree_structure_changed()
+                break
+            p = p.parent()
 
 
 
@@ -917,6 +935,14 @@ class InspectorPanel(QWidget):
         # Sync to hidden ins_type/ins_status for collect_properties
         self.ins_type.blockSignals(True); self.ins_type.setCurrentText(d.type_item if hasattr(d,"type_item") else ""); self.ins_type.blockSignals(False)
         self.ins_status.blockSignals(True); self.ins_status.setCurrentText(d.status if hasattr(d,"status") else ""); self.ins_status.blockSignals(False)
+
+        # Notify parent to refresh views (BUG-03)
+        p = self.parent()
+        while p:
+            if hasattr(p, "save_inspector"):
+                p.save_inspector()
+                break
+            p = p.parent()
 
     # ── Tab 4 : Versions ─────────────────────────────────────────────────
     def _build_versions_tab(self):
@@ -1213,6 +1239,17 @@ class CardEditorPanel(QWidget):
 #  VUE LISTE — arborescence avec colonnes (Titre, Étiquette, Statut, Type)
 # ─────────────────────────────────────────────────────────────────────────────
 
+class ListViewTree(QTreeWidget):
+    def dropEvent(self, event):
+        super().dropEvent(event)
+        # Find the ListViewWidget container to trigger sync
+        p = self.parentWidget()
+        while p:
+            if hasattr(p, "_on_rows_moved"):
+                p._on_rows_moved()
+                break
+            p = p.parentWidget()
+
 class ListViewWidget(QWidget):
     """Vue Liste : arborescence déroulable avec colonnes de métadonnées inline."""
 
@@ -1228,7 +1265,7 @@ class ListViewWidget(QWidget):
 
     def _build(self):
         v = QVBoxLayout(self); v.setContentsMargins(0,0,0,0)
-        self.tree = QTreeWidget()
+        self.tree = ListViewTree()
         self.tree.setHeaderLabels(self.HEADERS)
         self.tree.setColumnCount(4)
         hdr = self.tree.header()
@@ -1565,23 +1602,63 @@ class ListManagementDialog(QDialog):
 class ConfigDialog(QDialog):
     def __init__(self, parent, start_tab=0):
         super().__init__(parent)
-        self.app = parent; self.setWindowTitle("Configuration — Scriptura"); self.setMinimumSize(720,520)
-        layout = QHBoxLayout(self)
+        self.app = parent; self.setWindowTitle("Configuration — Scriptura"); self.setMinimumSize(750,550)
+        self.main_vbox = QVBoxLayout(self)
+
+        content_layout = QHBoxLayout()
         self.nav = QListWidget(); self.nav.setFixedWidth(175)
         self.nav.addItems(["🎨  Thème","🔤  Éditeur","📁  Projet","📋  Listes","☁️  Synchronisation","⌨️  Raccourcis","🌲  Arborescence"])
         self.nav.currentRowChanged.connect(lambda i: self.stack.setCurrentIndex(i))
         self.stack = QStackedWidget()
-        layout.addWidget(self.nav); layout.addWidget(self.stack)
+        content_layout.addWidget(self.nav); content_layout.addWidget(self.stack)
+        self.main_vbox.addLayout(content_layout)
+
+        # Buttons area
+        self._build_bottom_buttons()
+
         self._build_theme_panel(); self._build_editor_panel(); self._build_project_panel()
         self._build_lists_panel(); self._build_cloud_panel()
         self._build_shortcuts_panel(); self._build_tree_panel()
         self.nav.setCurrentRow(start_tab)
 
+    def _build_bottom_buttons(self):
+        btn_box = QHBoxLayout()
+        self.btn_ok = QPushButton("OK"); self.btn_ok.clicked.connect(self._on_ok)
+        self.btn_cancel = QPushButton("Annuler"); self.btn_cancel.clicked.connect(self.reject)
+        self.btn_apply = QPushButton("Appliquer"); self.btn_apply.clicked.connect(self._on_apply)
+        btn_box.addStretch()
+        btn_box.addWidget(self.btn_ok); btn_box.addWidget(self.btn_cancel); btn_box.addWidget(self.btn_apply)
+        self.main_vbox.addLayout(btn_box)
+
+    def _on_ok(self):
+        self._on_apply()
+        self.accept()
+
+    def _on_apply(self):
+        # Trigger all apply methods
+        self._apply_editor()
+        self._apply_project()
+        self._apply_cloud()
+        self._apply_tree()
+        # Theme is applied in real-time but we ensure it's saved
+        self.app.pm.config["theme"] = self.app.current_theme
+
+    def _wrap_tab(self, layout):
+        container = QGroupBox()
+        container.setLayout(layout)
+        # Use a border style similar to the tabs
+        container.setStyleSheet("QGroupBox { border: 1px solid #ccc; border-radius: 5px; margin-top: 10px; padding: 10px; }")
+        outer_v = QVBoxLayout()
+        outer_v.addWidget(container)
+        w = QWidget()
+        w.setLayout(outer_v)
+        return w
+
     def _build_theme_panel(self):
-        w = QWidget(); v = QVBoxLayout(w)
+        v = QVBoxLayout()
         v.addWidget(QLabel("<b>Thèmes visuels</b>"))
         v.addWidget(QLabel("<small>Un seul thème actif à la fois.</small>"))
-        self._tbg = QButtonGroup(w); self._tbg.setExclusive(True)
+        self._tbg = QButtonGroup(self); self._tbg.setExclusive(True)
         for name,colors in self.app.themes.items():
             rw = QWidget(); r = QHBoxLayout(rw); r.setContentsMargins(0,2,0,2)
             for key in ["sidebar","editor_bg","highlight"]:
@@ -1591,10 +1668,11 @@ class ConfigDialog(QDialog):
             btn = QRadioButton(f"  {name}"); btn.setChecked(name==self.app.current_theme)
             btn.toggled.connect(lambda checked,n=name: self.app.apply_theme(n) if checked else None)
             self._tbg.addButton(btn); r.addWidget(btn,1); v.addWidget(rw)
-        v.addStretch(); self.stack.addWidget(w)
+        v.addStretch()
+        self.stack.addWidget(self._wrap_tab(v))
 
     def _build_editor_panel(self):
-        w = QWidget(); v = QVBoxLayout(w); v.addWidget(QLabel("<b>Éditeur</b>"))
+        v = QVBoxLayout(); v.addWidget(QLabel("<b>Éditeur</b>"))
         form = QFormLayout(); cfg = self.app.pm.config
         self.cfg_font = QFontComboBox(); self.cfg_font.setCurrentFont(QFont(cfg.get("font_family","Georgia")))
         self.cfg_size = QSpinBox(); self.cfg_size.setRange(8,30); self.cfg_size.setValue(cfg.get("font_size",13))
@@ -1605,8 +1683,8 @@ class ConfigDialog(QDialog):
         form.addRow("Police :",self.cfg_font); form.addRow("Taille :",self.cfg_size)
         form.addRow("Interligne :",self.cfg_para); form.addRow("Largeur max :",self.cfg_width)
         v.addLayout(form); v.addWidget(self.cfg_tw); v.addWidget(self.cfg_wc)
-        btn=QPushButton("Appliquer"); btn.clicked.connect(self._apply_editor)
-        v.addWidget(btn); v.addStretch(); self.stack.addWidget(w)
+        v.addStretch()
+        self.stack.addWidget(self._wrap_tab(v))
 
     def _apply_editor(self):
         cfg=self.app.pm.config
@@ -1619,7 +1697,7 @@ class ConfigDialog(QDialog):
         self.app.apply_editor_config()
 
     def _build_project_panel(self):
-        w=QWidget(); v=QVBoxLayout(w); v.addWidget(QLabel("<b>Métadonnées du projet</b>"))
+        v=QVBoxLayout(); v.addWidget(QLabel("<b>Métadonnées du projet</b>"))
         pd=self.app.pm.project_data; form=QFormLayout()
         self.cfg_title=QLineEdit(pd.title); self.cfg_author=QLineEdit(pd.author)
         self.cfg_genre=QComboBox(); self.cfg_genre.setEditable(True); self.cfg_genre.addItems(GENRES)
@@ -1630,8 +1708,9 @@ class ConfigDialog(QDialog):
         self.cfg_autosave=QSpinBox(); self.cfg_autosave.setRange(0,600); self.cfg_autosave.setValue(self.app.pm.config.get("autosave_interval",60)); self.cfg_autosave.setSuffix(" s (0=désactivé)")
         for lbl,w2 in [("Titre :",self.cfg_title),("Auteur :",self.cfg_author),("Genre :",self.cfg_genre),("Objectif :",self.cfg_goal),("Statut :",self.cfg_status),("Description :",self.cfg_desc),("Sauvegarde auto :",self.cfg_autosave)]:
             form.addRow(lbl,w2)
-        v.addLayout(form); btn=QPushButton("Appliquer"); btn.clicked.connect(self._apply_project)
-        v.addWidget(btn); v.addStretch(); self.stack.addWidget(w)
+        v.addLayout(form)
+        v.addStretch()
+        self.stack.addWidget(self._wrap_tab(v))
 
     def _apply_project(self):
         pd=self.app.pm.project_data
@@ -1643,7 +1722,7 @@ class ConfigDialog(QDialog):
 
     def _build_lists_panel(self):
         """Listes directement intégrées sans bouton intermédiaire."""
-        w = QWidget(); v = QVBoxLayout(w); v.setContentsMargins(8,8,8,8)
+        v = QVBoxLayout()
         v.addWidget(QLabel("<b>📋 Paramétrage des listes</b>"))
         tabs = QTabWidget()
         # Statuts
@@ -1658,7 +1737,7 @@ class ConfigDialog(QDialog):
         tabs.addTab(self._make_editable_list_tab("session_locations","Lieux de séance",
             self.app.pm.get_session_locations()), "Lieux séance")
         v.addWidget(tabs, 1)
-        self.stack.addWidget(w)
+        self.stack.addWidget(self._wrap_tab(v))
 
     def _make_editable_list_tab(self, cfg_key, title, items):
         w = QWidget(); v = QVBoxLayout(w); v.setSpacing(4)
@@ -1745,15 +1824,15 @@ class ConfigDialog(QDialog):
             self._lbl_list.addItem(item)
 
     def _build_cloud_panel(self):
-        w=QWidget(); v=QVBoxLayout(w); v.addWidget(QLabel("<b>☁️ Synchronisation Cloud</b>"))
+        v=QVBoxLayout(); v.addWidget(QLabel("<b>☁️ Synchronisation Cloud</b>"))
         v.addWidget(QLabel("Placez votre dossier projet dans le dossier de votre client cloud.\n"))
         row=QHBoxLayout()
         self.cfg_cloud=QLineEdit(self.app.pm.config.get("cloud_path",""))
         btn_b=QPushButton("Parcourir…"); btn_b.clicked.connect(self._browse_cloud)
         row.addWidget(self.cfg_cloud); row.addWidget(btn_b); v.addLayout(row)
         v.addWidget(QLabel("• Dropbox: ~/Dropbox/\n• Google Drive: ~/Google Drive/\n• KDrive: ~/kdrive/\n• OneDrive: ~/OneDrive/"))
-        btn=QPushButton("Enregistrer"); btn.clicked.connect(self._apply_cloud)
-        v.addWidget(btn); v.addStretch(); self.stack.addWidget(w)
+        v.addStretch()
+        self.stack.addWidget(self._wrap_tab(v))
 
     def _browse_cloud(self):
         d=QFileDialog.getExistingDirectory(self,"Choisir le dossier cloud")
@@ -1764,19 +1843,28 @@ class ConfigDialog(QDialog):
         QMessageBox.information(self,"Cloud","Chemin cloud enregistré.")
 
     def _build_shortcuts_panel(self):
-        w=QWidget(); v=QVBoxLayout(w); v.addWidget(QLabel("<b>Raccourcis clavier</b>"))
+        v=QVBoxLayout(); v.addWidget(QLabel("<b>Raccourcis clavier</b>"))
         shortcuts=[("Sauvegarder","Ctrl+S"),("Nouveau projet","Ctrl+Shift+N"),("Ouvrir projet","Ctrl+O"),
                    ("Mode Zen","F11"),("Vue Texte","Ctrl+1"),("Vue Cartes","Ctrl+2"),("Vue Liste","Ctrl+3"),
                    ("Annuler","Ctrl+Z"),("Rétablir","Ctrl+Y"),("Gras","Ctrl+B"),("Italique","Ctrl+I")]
         form=QFormLayout()
         for lbl,key in shortcuts: form.addRow(lbl,QLabel(f"<code>{key}</code>"))
-        v.addLayout(form); v.addStretch(); self.stack.addWidget(w)
+        v.addLayout(form); v.addStretch()
+        self.stack.addWidget(self._wrap_tab(v))
 
     def _build_tree_panel(self):
-        w=QWidget(); v=QVBoxLayout(w); v.addWidget(QLabel("<b>Arborescence</b>"))
-        self.cfg_icons=QCheckBox("Afficher les icônes"); self.cfg_icons.setChecked(True)
-        self.cfg_status=QCheckBox("Afficher le statut"); self.cfg_status.setChecked(True)
-        v.addWidget(self.cfg_icons); v.addWidget(self.cfg_status); v.addStretch(); self.stack.addWidget(w)
+        v=QVBoxLayout(); v.addWidget(QLabel("<b>Arborescence</b>"))
+        cfg = self.app.pm.config
+        self.cfg_icons=QCheckBox("Afficher les icônes"); self.cfg_icons.setChecked(cfg.get("show_tree_icons", True))
+        self.cfg_status=QCheckBox("Afficher le statut"); self.cfg_status.setChecked(cfg.get("show_tree_status", True))
+        v.addWidget(self.cfg_icons); v.addWidget(self.cfg_status); v.addStretch()
+        self.stack.addWidget(self._wrap_tab(v))
+
+    def _apply_tree(self):
+        cfg = self.app.pm.config
+        cfg["show_tree_icons"] = self.cfg_icons.isChecked()
+        cfg["show_tree_status"] = self.cfg_status.isChecked()
+        self.app._rebuild_tree_from_pm()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2135,10 +2223,12 @@ class ScripturaApp(QMainWindow):
         self.create_menus(); self.create_main_toolbar()
         container=QWidget(); self.setCentralWidget(container)
         self.main_layout=QVBoxLayout(container); self.main_layout.setContentsMargins(0,0,0,0); self.main_layout.setSpacing(0)
-        self.middle_area=QHBoxLayout(); self.middle_area.setSpacing(0)
+        self.middle_area = QSplitter(Qt.Orientation.Horizontal)
+        self.middle_area.setHandleWidth(1)
+        self.middle_area.setChildrenCollapsible(False)
 
         # ── Sidebar gauche ─────────────────────────────────────────────────
-        self.left_sidebar=QWidget(); self.left_sidebar.setFixedWidth(250)
+        self.left_sidebar=QWidget(); self.left_sidebar.setMinimumWidth(150); self.left_sidebar.setMaximumWidth(450)
         lv=QVBoxLayout(self.left_sidebar); lv.setContentsMargins(4,4,4,4)
         self.sidebar_label=QLabel("EXPLORATEUR")
         self.tree=DnDTreeWidget()
@@ -2165,6 +2255,7 @@ class ScripturaApp(QMainWindow):
         self.editor.setAutoFormatting(QTextEdit.AutoFormattingFlag.AutoAll)
         self.editor.textChanged.connect(self.save_text_session)
         self.editor.textChanged.connect(self.update_stats)
+        self.editor.cursorPositionChanged.connect(self._typewriter_tick)
         self.editor.selectionChanged.connect(self.sync_format_toolbar)
         tv_l.addWidget(self.editor)
         self.central_stack.addWidget(self.text_editor_container)
@@ -2196,7 +2287,7 @@ class ScripturaApp(QMainWindow):
         }
 
         # ── Sidebar droite (inspecteur) ────────────────────────────────────
-        self.inspector=InspectorPanel(self.pm); self.inspector.setFixedWidth(275)
+        self.inspector=InspectorPanel(self.pm); self.inspector.setMinimumWidth(200); self.inspector.setMaximumWidth(500)
         self.inspector.ins_name.textChanged.connect(self.sync_name)
         self.inspector.ins_synopsis.textChanged.connect(self.save_inspector)
         self.inspector.ins_status.currentTextChanged.connect(self.save_inspector)
@@ -2204,7 +2295,9 @@ class ScripturaApp(QMainWindow):
         self.middle_area.addWidget(self.left_sidebar)
         self.middle_area.addWidget(self.central_stack)
         self.middle_area.addWidget(self.inspector)
-        self.main_layout.addLayout(self.middle_area)
+        self.middle_area.setStretchFactor(1, 1) # Central stack takes remaining space
+        self.middle_area.setSizes([250, 875, 275])
+        self.main_layout.addWidget(self.middle_area)
 
         # ── Barre de statut ────────────────────────────────────────────────
         self.status_bar=QWidget(); self.status_bar.setFixedHeight(45)
@@ -2212,11 +2305,11 @@ class ScripturaApp(QMainWindow):
 
         self.status_left=QWidget(); self.status_left.setFixedWidth(250)
         sll=QHBoxLayout(self.status_left)
-        self.btn_page=QPushButton("📄+"); self.btn_page.setFixedWidth(50)
-        self.btn_folder=QPushButton("📁+"); self.btn_folder.setFixedWidth(50)
-        self.btn_cfg=QPushButton("⚙"); self.btn_cfg.setFixedWidth(50)
+        self.btn_page=QPushButton("📄+"); self.btn_page.setFixedWidth(50); self.btn_page.setObjectName("sidebar_bottom_btn")
+        self.btn_folder=QPushButton("📁+"); self.btn_folder.setFixedWidth(50); self.btn_folder.setObjectName("sidebar_bottom_btn")
+        self.btn_cfg=QPushButton("⚙"); self.btn_cfg.setFixedWidth(50); self.btn_cfg.setObjectName("sidebar_bottom_btn")
         for b in [self.btn_page,self.btn_folder,self.btn_cfg]:
-            b.setStyleSheet("color:white;font-weight:bold;font-size:16px;border:none;"); sll.addWidget(b)
+            sll.addWidget(b)
         self.btn_page.clicked.connect(self.add_page)
         self.btn_folder.clicked.connect(self.add_folder)
         self.btn_cfg.clicked.connect(lambda: self.open_config(0))
@@ -2292,13 +2385,19 @@ class ScripturaApp(QMainWindow):
         return "📁" if d.type_item in folder_types else "📄"
 
     def _rebuild_tree_from_pm(self):
+        cfg = self.pm.config
+        show_icons = cfg.get("show_tree_icons", True)
+        show_status = cfg.get("show_tree_status", True)
+
         # Manuscrit
         ms_root=self.roots["Manuscrit"]; ms_root.takeChildren()
         def add_ms(parent_widget,uid):
             d=self.pm.items.get(uid)
             if not d: return
-            icon=self._get_ms_icon(d)
-            node=QTreeWidgetItem(parent_widget,[f"{icon} {d.name}"])
+            icon=self._get_ms_icon(d) if show_icons else ""
+            status = f" [{d.status}]" if show_status else ""
+            text = f"{icon} {d.name}{status}".strip()
+            node=QTreeWidgetItem(parent_widget,[text])
             node.setData(0,Qt.ItemDataRole.UserRole,d)
             for cuid in d.children: add_ms(node,cuid)
         for uid in self.pm.tree_roots.get("Manuscrit",[]): add_ms(ms_root,uid)
@@ -2312,8 +2411,10 @@ class ScripturaApp(QMainWindow):
                 c=self.pm.cards.get(uid)
                 if not c: return
                 # Garantir le bon icon selon _is_folder
-                icon = "📁" if c._is_folder else SimpleCardData.ICON_MAP.get(c.kind,"📄")
-                node=QTreeWidgetItem(parent_widget,[f"{icon} {c.name}"])
+                icon = ("📁" if c._is_folder else SimpleCardData.ICON_MAP.get(c.kind,"📄")) if show_icons else ""
+                status = f" [{c.status}]" if show_status else ""
+                text = f"{icon} {c.name}{status}".strip()
+                node=QTreeWidgetItem(parent_widget,[text])
                 node.setData(0,Qt.ItemDataRole.UserRole,c)
                 for cuid in c.children: add_card(node,cuid)
             for uid in self.pm.tree_roots.get(group,[]): add_card(root,uid)
@@ -2368,8 +2469,10 @@ class ScripturaApp(QMainWindow):
                 self.central_stack.setCurrentIndex(self.STACK["Projet"]); self.refresh_project_page()
             elif "Manuscrit" in text:
                 self.central_stack.setCurrentIndex(self._current_view_index)
+                if self._current_view_index == self.STACK["Texte"]:
+                    self._load_composite(self.roots["Manuscrit"], None)
                 # Auto-refresh des vues
-                if self._current_view_index==self.STACK["Liste"]:
+                elif self._current_view_index==self.STACK["Liste"]:
                     self.show_list_view()
                 elif self._current_view_index==self.STACK["Cartes"]:
                     self.show_card_view()
@@ -2429,6 +2532,16 @@ class ScripturaApp(QMainWindow):
             return None
         return search(self.tree.invisibleRootItem())
 
+    def on_tree_structure_changed(self):
+        """Called when drag & drop happens in the main tree."""
+        self._collect_tree_structure()
+        # If List View is active, refresh it
+        if self.central_stack.currentIndex() == self.STACK["Liste"]:
+            self.show_list_view()
+        # If Card View is active, refresh it
+        elif self.central_stack.currentIndex() == self.STACK["Cartes"]:
+            self.show_card_view()
+
     def sync_tree_order_from_listview(self, lv: "ListViewWidget"):
         """Resynchronise l'arbre principal depuis l'ordre ET la hiérarchie de la Vue Liste."""
         # Parcourir récursivement la listview et reconstruire l'arbre principal
@@ -2455,8 +2568,8 @@ class ScripturaApp(QMainWindow):
                 # Récursion sur les enfants
                 sync_children(lv_child, app_node)
 
-        ms_root = self.roots["Manuscrit"]
-        sync_children(lv.tree.invisibleRootItem(), ms_root)
+        parent_node = getattr(self, "_list_view_current_parent", self.roots["Manuscrit"])
+        sync_children(lv.tree.invisibleRootItem(), parent_node)
         # Persist the new order to pm.tree_roots / pm.items.children immediately
         self._collect_tree_structure()
 
@@ -2536,39 +2649,48 @@ class ScripturaApp(QMainWindow):
         # Spacer centre-gauche
         sp_cl = QWidget(); sp_cl.setSizePolicy(QSizePolicy.Policy.Expanding,QSizePolicy.Policy.Preferred)
         self.main_toolbar.addWidget(sp_cl)
-        # Centre: Texte, Cartes, Liste
-        for act in [self.act_text, self.act_cards, self.act_list]:
+        # Centre: Texte, Cartes, Liste, Séances
+        self.act_sessions = make_action("📊","Séances",self)
+        self.act_sessions.setCheckable(True)
+        self.act_sessions.triggered.connect(lambda: (
+            self.central_stack.setCurrentIndex(self.STACK["Séances"]),
+            self.sessions_panel._refresh(),
+            setattr(self, "_current_view_index", self.STACK["Séances"])
+        ))
+
+        for act in [self.act_text, self.act_cards, self.act_list, self.act_sessions]:
             self.main_toolbar.addAction(act)
+            self._view_act_group.addAction(act)
+
         # Spacer centre-droit
         sp_cr = QWidget(); sp_cr.setSizePolicy(QSizePolicy.Policy.Expanding,QSizePolicy.Policy.Preferred)
         self.main_toolbar.addWidget(sp_cr)
-        # Séances
-        act_sessions = make_action("📊","Séances",self)
-        act_sessions.triggered.connect(lambda: (
-            self.central_stack.setCurrentIndex(self.STACK["Séances"]),
-            self.sessions_panel._refresh()
-        ))
-        self.main_toolbar.addAction(act_sessions)
         # Right: Zen
         self.main_toolbar.addAction(self.act_zen)
 
     def _load_item_in_editor(self, tree_node, data: ItemData):
         """Charge un item dans l'éditeur. Si il a des enfants, mode composite."""
-        child_items = []
+        has_child_items = False
         for i in range(tree_node.childCount()):
             ch = tree_node.child(i)
             cd = ch.data(0, Qt.ItemDataRole.UserRole)
-            if isinstance(cd, ItemData): child_items.append((ch, cd))
+            if isinstance(cd, ItemData):
+                has_child_items = True
+                break
 
-        if child_items:
-            self._load_composite(tree_node, data, child_items)
+        if has_child_items:
+            self._load_composite(tree_node, data)
         else:
             self._exit_composite_mode()
             self.editor.blockSignals(True)
+            # Reset format to avoid "bleeding" from previous item
+            self.editor.setCurrentCharFormat(QTextCharFormat())
             if data.content and data.content.strip().startswith("<"):
                 self.editor.setHtml(data.content)
             else:
                 self.editor.setPlainText(data.content or "")
+            # Re-apply base font from config
+            self.apply_editor_config()
             self.editor.blockSignals(False)
 
     def _collect_descendants(self, node, depth=0):
@@ -2582,7 +2704,7 @@ class ScripturaApp(QMainWindow):
                 results.extend(self._collect_descendants(child, depth+1))
         return results
 
-    def _load_composite(self, parent_node, parent_data: ItemData, children):
+    def _load_composite(self, parent_node, parent_data: ItemData = None):
         """Affiche les sous-éléments récursivement avec séparateurs et zones éditables.
         Un seul QScrollArea global — pas d'ascenseur individuel par zone."""
         self._composite_mode = True
@@ -2661,6 +2783,9 @@ class ScripturaApp(QMainWindow):
                 e.setMinimumHeight(max(120, int(doc_h) + 20))
             ed.document().contentsChanged.connect(adjust_height)
             ed.textChanged.connect(lambda d=data, e=ed: self._save_composite_child(d, e))
+            ed.selectionChanged.connect(self.sync_format_toolbar)
+            ed.cursorPositionChanged.connect(self._typewriter_tick)
+            ed.setAcceptRichText(True)
             self._composite_editors[data.uid] = ed
             vlay.addWidget(ed)
 
@@ -2668,7 +2793,8 @@ class ScripturaApp(QMainWindow):
 
     def _save_composite_child(self, data: ItemData, editor: "QTextEdit"):
         """Sauvegarde le contenu d'un enfant en mode composite."""
-        data.content = editor.toPlainText()
+        data.content = editor.toHtml()
+        data.content_plain = editor.toPlainText()
         data.modified_at = datetime.now().isoformat()
 
     def _exit_composite_mode(self):
@@ -3041,6 +3167,16 @@ class ScripturaApp(QMainWindow):
             self._session_btn.setText("⏹ Arrêter séance")
             self._session_btn.setStyleSheet("font-size:11px;color:#E53935;")
 
+    def _typewriter_tick(self):
+        if self.pm.config.get("typewriter_mode", False):
+            ed = self._active_editor()
+            cursor_rect = ed.cursorRect()
+            viewport_height = ed.viewport().height()
+            diff = cursor_rect.top() - viewport_height // 2
+            if abs(diff) > 5:
+                scrollbar = ed.verticalScrollBar()
+                scrollbar.setValue(scrollbar.value() + diff)
+
     def _session_tick(self):
         self._session_chrono.setText(self._session_tracker.elapsed_str())
 
@@ -3125,13 +3261,17 @@ class ScripturaApp(QMainWindow):
         body.setStyleSheet(f"background:{cb};border:none;")
         bl = QVBoxLayout(body); bl.setContentsMargins(10, 8, 10, 8); bl.setSpacing(4)
 
-        # Nom éditable (QLineEdit)
-        name_edit = QLineEdit(data.name)
+        # Nom éditable (QPlainTextEdit pour le retour à la ligne)
+        name_edit = QPlainTextEdit(data.name)
         name_edit.setStyleSheet(
             f"font-weight:bold;font-size:13px;border:none;background:transparent;color:{ct};"
         )
+        name_edit.setFixedHeight(40)
+        name_edit.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         name_edit.setReadOnly(False)
-        def on_name_changed(txt, d=data, c=child):
+        def on_name_changed(d=data, c=child, ed=name_edit):
+            txt = ed.toPlainText()
+            if d.name == txt: return
             d.name = txt
             icon = c.text(0).split()[0] if c.text(0) else "📄"
             c.setText(0, f"{icon} {txt}")
@@ -3143,6 +3283,7 @@ class ScripturaApp(QMainWindow):
             self._card_widgets[data.uid] = {}
         self._card_widgets[data.uid]["name"] = name_edit
         self._card_widgets[data.uid]["frame"] = card_frame
+        self._card_widgets[data.uid]["strip"] = strip
 
         # Synopsis éditable
         syn_edit = QTextEdit()
@@ -3209,6 +3350,32 @@ class ScripturaApp(QMainWindow):
             local_pos  = self.card_scroll.mapFromGlobal(global_pos)
             ghost.move(local_pos.x() - CARD_W//2, local_pos.y() - 20)
 
+            # Drag indicator (dotted line)
+            indicator = getattr(self, "_card_drag_indicator", None)
+            if indicator is None:
+                indicator = QFrame(self.card_container)
+                indicator.setStyleSheet(f"border: 2px dashed {ac}; background: transparent;")
+                indicator.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+                self._card_drag_indicator = indicator
+
+            # Find target index based on position
+            grid = self.card_grid
+            moved_idx = -1
+            for i in range(grid.count()):
+                if grid.itemAt(i).widget() is wrapper:
+                    moved_idx = i; break
+
+            target_col = max(0, min(2, (local_pos.x() + self.card_scroll.horizontalScrollBar().value()) // CARD_W))
+            target_row = max(0, (local_pos.y() + self.card_scroll.verticalScrollBar().value()) // CARD_H)
+            target_idx = min(grid.count() - 1, target_row * 3 + target_col)
+
+            if target_idx != -1:
+                target_item = grid.itemAt(target_idx)
+                if target_item:
+                    rect = target_item.geometry()
+                    indicator.setGeometry(rect)
+                    indicator.show()
+
         def card_release(ev, wrapper=wrapper):
             if _drag_start[0] is None: return
             end_pos = ev.position().toPoint() if hasattr(ev,"position") else ev.pos()
@@ -3220,6 +3387,9 @@ class ScripturaApp(QMainWindow):
             if ghost:
                 ghost.deleteLater()
                 self._card_ghost = None
+            indicator = getattr(self, "_card_drag_indicator", None)
+            if indicator:
+                indicator.hide()
             # Si déplacement suffisant : chercher la carte cible et échanger
             if delta.manhattanLength() > 20:
                 self._card_drop(wrapper, delta)
@@ -3259,6 +3429,7 @@ class ScripturaApp(QMainWindow):
         target_node = parent.child(target_idx)
         if not moved_node or not target_node: return
         parent.removeChild(moved_node); parent.insertChild(target_idx, moved_node)
+        self._collect_tree_structure()
         # Refresh
         self.show_card_view()
 
@@ -3268,10 +3439,25 @@ class ScripturaApp(QMainWindow):
         if not widgets: return
         name_ed = widgets.get("name")
         syn_ed  = widgets.get("syn")
-        if name_ed and name_ed.text() != data.name:
-            name_ed.blockSignals(True); name_ed.setText(data.name); name_ed.blockSignals(False)
+        strip   = widgets.get("strip")
+        if name_ed:
+            current_text = name_ed.toPlainText() if isinstance(name_ed, QPlainTextEdit) else name_ed.text()
+            if current_text != data.name:
+                name_ed.blockSignals(True)
+                if isinstance(name_ed, QPlainTextEdit): name_ed.setPlainText(data.name)
+                else: name_ed.setText(data.name)
+                name_ed.blockSignals(False)
         if syn_ed and syn_ed.toPlainText() != data.synopsis:
             syn_ed.blockSignals(True); syn_ed.setPlainText(data.synopsis or ""); syn_ed.blockSignals(False)
+
+        # Refresh label color (BUG-03)
+        if strip:
+            label_color = "#888888"
+            for lbl in self.pm.get_labels():
+                if lbl["name"] == data.label:
+                    label_color = lbl["color"]
+                    break
+            strip.setStyleSheet(f"background:{label_color};border-radius:8px 8px 0 0;border:none;")
 
     def show_card_view(self):
         self.central_stack.setCurrentIndex(self.STACK["Cartes"])
@@ -3305,6 +3491,7 @@ class ScripturaApp(QMainWindow):
             parent=self.roots["Manuscrit"]
         else:
             parent=sel
+        self._list_view_current_parent = parent
         self.list_view.refresh(parent,self.pm)
 
     def refresh_project_page(self): self.project_page.refresh()
@@ -3336,7 +3523,7 @@ class ScripturaApp(QMainWindow):
         self.font_box = QFontComboBox()
         self.font_box.setFontFilters(QFontComboBox.FontFilter.ScalableFonts)
         self.font_box.setFixedWidth(160)
-        self.font_box.currentFontChanged.connect(self.editor.setCurrentFont)
+        self.font_box.currentFontChanged.connect(self._format_font_family)
         self.format_toolbar.addWidget(self.font_box)
 
         self.size_box = QComboBox()
@@ -3344,48 +3531,46 @@ class ScripturaApp(QMainWindow):
         for s in [7,8,9,10,11,12,13,14,16,18,20,24,28,32,36,48,64,72,96]:
             self.size_box.addItem(str(s))
         self.size_box.setCurrentText("13")
-        self.size_box.currentTextChanged.connect(
-            lambda s: self.editor.setFontPointSize(float(s)) if s.isdigit() else None)
+        self.size_box.currentTextChanged.connect(self._format_font_size)
         self.format_toolbar.addWidget(self.size_box)
         self.format_toolbar.addSeparator()
 
         # Gras / Italique / Souligné / Barré
         self.bold_action = QAction(self._icon("edit-bold.png"), "Gras", self)
         self.bold_action.setShortcut(QKeySequence("Ctrl+B")); self.bold_action.setCheckable(True)
-        self.bold_action.toggled.connect(
-            lambda x: self.editor.setFontWeight(QFont.Weight.Bold if x else QFont.Weight.Normal))
+        self.bold_action.triggered.connect(self._format_bold)
         self.format_toolbar.addAction(self.bold_action)
 
         self.italic_action = QAction(self._icon("edit-italic.png"), "Italique", self)
         self.italic_action.setShortcut(QKeySequence("Ctrl+I")); self.italic_action.setCheckable(True)
-        self.italic_action.toggled.connect(self.editor.setFontItalic)
+        self.italic_action.triggered.connect(self._format_italic)
         self.format_toolbar.addAction(self.italic_action)
 
         self.underline_action = QAction(self._icon("edit-underline.png"), "Souligné", self)
         self.underline_action.setShortcut(QKeySequence("Ctrl+U")); self.underline_action.setCheckable(True)
-        self.underline_action.toggled.connect(self.editor.setFontUnderline)
+        self.underline_action.triggered.connect(self._format_underline)
         self.format_toolbar.addAction(self.underline_action)
         self.format_toolbar.addSeparator()
 
         # Alignement
         self.alignl_action = QAction(self._icon("edit-alignment.png"), "Gauche", self)
         self.alignl_action.setCheckable(True)
-        self.alignl_action.triggered.connect(lambda: self.editor.setAlignment(Qt.AlignmentFlag.AlignLeft))
+        self.alignl_action.triggered.connect(lambda: self._active_editor().setAlignment(Qt.AlignmentFlag.AlignLeft))
         self.format_toolbar.addAction(self.alignl_action)
 
         self.alignc_action = QAction(self._icon("edit-alignment-center.png"), "Centre", self)
         self.alignc_action.setCheckable(True)
-        self.alignc_action.triggered.connect(lambda: self.editor.setAlignment(Qt.AlignmentFlag.AlignCenter))
+        self.alignc_action.triggered.connect(lambda: self._active_editor().setAlignment(Qt.AlignmentFlag.AlignCenter))
         self.format_toolbar.addAction(self.alignc_action)
 
         self.alignr_action = QAction(self._icon("edit-alignment-right.png"), "Droite", self)
         self.alignr_action.setCheckable(True)
-        self.alignr_action.triggered.connect(lambda: self.editor.setAlignment(Qt.AlignmentFlag.AlignRight))
+        self.alignr_action.triggered.connect(lambda: self._active_editor().setAlignment(Qt.AlignmentFlag.AlignRight))
         self.format_toolbar.addAction(self.alignr_action)
 
         self.alignj_action = QAction(self._icon("edit-alignment-justify.png"), "Justifié", self)
         self.alignj_action.setCheckable(True)
-        self.alignj_action.triggered.connect(lambda: self.editor.setAlignment(Qt.AlignmentFlag.AlignJustify))
+        self.alignj_action.triggered.connect(lambda: self._active_editor().setAlignment(Qt.AlignmentFlag.AlignJustify))
         self.format_toolbar.addAction(self.alignj_action)
 
         # Groupe exclusif alignement
@@ -3409,7 +3594,7 @@ class ScripturaApp(QMainWindow):
         #a_list = QAction("≡•", "Liste", self)
         a_list = QAction("≡•", self)
         a_list.setToolTip("Liste") # On définit le nom "Liste" comme info-bulle
-        a_list.triggered.connect(lambda: self.editor.textCursor().insertList(
+        a_list.triggered.connect(lambda: self._active_editor().textCursor().insertList(
             QTextListFormat.Style.ListDisc))
         self.format_toolbar.addAction(a_list)
 
@@ -3422,30 +3607,73 @@ class ScripturaApp(QMainWindow):
         # Wrap text toggle
         self.wrap_action = QAction("↵ Retour", self)
         self.wrap_action.setCheckable(True); self.wrap_action.setChecked(True)
-        self.wrap_action.toggled.connect(
-            lambda on: self.editor.setLineWrapMode(
-                QTextEdit.LineWrapMode.WidgetWidth if on else QTextEdit.LineWrapMode.NoWrap))
+        self.wrap_action.toggled.connect(self._format_wrap)
         self.format_toolbar.addAction(self.wrap_action)
 
         # Liste des widgets de format pour blockSignals
         self._format_actions = [self.font_box, self.size_box,
                                  self.bold_action, self.italic_action, self.underline_action]
 
+    def _active_editor(self):
+        if self._composite_mode:
+            # Find which editor has focus
+            for ed in self._composite_editors.values():
+                if ed.hasFocus(): return ed
+            # Fallback to the first one
+            if self._composite_editors:
+                return list(self._composite_editors.values())[0]
+        return self.editor
+
+    def _format_font_family(self, font):
+        self._active_editor().setCurrentFont(font)
+
+    def _format_font_size(self, s):
+        if s.isdigit():
+            self._active_editor().setFontPointSize(float(s))
+
+    def _format_bold(self):
+        ed = self._active_editor()
+        fmt = ed.currentCharFormat()
+        fmt.setFontWeight(QFont.Weight.Bold if self.bold_action.isChecked() else QFont.Weight.Normal)
+        ed.setCurrentCharFormat(fmt)
+
+    def _format_italic(self):
+        ed = self._active_editor()
+        fmt = ed.currentCharFormat()
+        fmt.setFontItalic(self.italic_action.isChecked())
+        ed.setCurrentCharFormat(fmt)
+
+    def _format_underline(self):
+        ed = self._active_editor()
+        fmt = ed.currentCharFormat()
+        fmt.setFontUnderline(self.underline_action.isChecked())
+        ed.setCurrentCharFormat(fmt)
+
+    def _format_wrap(self, on):
+        mode = QTextEdit.LineWrapMode.WidgetWidth if on else QTextEdit.LineWrapMode.NoWrap
+        self.editor.setLineWrapMode(mode)
+        if self._composite_mode:
+            for ed in self._composite_editors.values():
+                ed.setLineWrapMode(mode)
+
     def apply_font_change(self, font):
+        ed = self._active_editor()
         font.setPointSize(int(self.size_box.currentText()) if self.size_box.currentText().isdigit() else 13)
-        self.editor.setFont(font); self.editor.setCurrentFont(font); self.editor.setFocus()
+        ed.setFont(font); ed.setCurrentFont(font); ed.setFocus()
 
     def sync_format_toolbar(self):
         """Met à jour la toolbar en fonction de la sélection courante."""
+        ed = self._active_editor()
         for o in self._format_actions: o.blockSignals(True)
-        f = self.editor.currentFont()
+        f = ed.currentFont()
+        fmt = ed.currentCharFormat()
         self.font_box.setCurrentFont(f)
         sz = int(f.pointSize()) if f.pointSize()>0 else 13
         self.size_box.setCurrentText(str(sz))
-        self.bold_action.setChecked(f.bold())
-        self.italic_action.setChecked(f.italic())
-        self.underline_action.setChecked(f.underline())
-        al = self.editor.alignment()
+        self.bold_action.setChecked(fmt.fontWeight() == QFont.Weight.Bold)
+        self.italic_action.setChecked(fmt.fontItalic())
+        self.underline_action.setChecked(fmt.fontUnderline())
+        al = ed.alignment()
         self.alignl_action.setChecked(al == Qt.AlignmentFlag.AlignLeft)
         self.alignc_action.setChecked(al == Qt.AlignmentFlag.AlignCenter)
         self.alignr_action.setChecked(al == Qt.AlignmentFlag.AlignRight)
@@ -3454,16 +3682,20 @@ class ScripturaApp(QMainWindow):
 
     def change_color(self):
         c = QColorDialog.getColor()
-        if c.isValid(): self.editor.setTextColor(c)
+        if c.isValid():
+            ed = self._active_editor()
+            ed.setTextColor(c)
 
     def change_highlight(self):
         c = QColorDialog.getColor()
-        if c.isValid(): self.editor.setTextBackgroundColor(c)
+        if c.isValid():
+            ed = self._active_editor()
+            ed.setTextBackgroundColor(c)
 
     def file_print(self):
         dlg = QPrintDialog(self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
-            self.editor.print_(dlg.printer())
+            self._active_editor().print_(dlg.printer())
 
     # ─── Thème ────────────────────────────────────────────────────────────────
     def apply_theme(self, theme_name):
@@ -3500,14 +3732,18 @@ class ScripturaApp(QMainWindow):
         self.list_view.tree.setStyleSheet(
             f"QTreeWidget{{background:{c['editor_bg']};color:{c['text']};border:none;}}"
             f"QTreeWidget::item:selected{{background:{c['highlight']};color:white;}}"
+            f"QTreeWidget::branch:selected{{background:{c['highlight']};}}"
             f"QTreeWidget::item:hover{{background:{c['highlight']}40;}}"
+            f"QTreeWidget::branch:hover{{background:{c['highlight']}40;}}"
         )
         # Style arborescence gauche selon thème
         sb = label_text_color(c["sidebar"])
         self.tree.setStyleSheet(
             f"QTreeWidget{{background:{c['sidebar']};color:{sb};border:none;}}"
             f"QTreeWidget::item:selected{{background:{c['accent']}80;color:{sb};border-radius:3px;}}"
+            f"QTreeWidget::branch:selected{{background:{c['accent']}80;}}"
             f"QTreeWidget::item:hover{{background:{c['accent']}40;}}"
+            f"QTreeWidget::branch:hover{{background:{c['accent']}40;}}"
         )
         # Goal progress bar
         self.goal_progress.setStyleSheet(f"""
@@ -3519,6 +3755,8 @@ class ScripturaApp(QMainWindow):
     def apply_editor_config(self):
         cfg=self.pm.config
         self.editor.setFont(QFont(cfg.get("font_family","Georgia"),cfg.get("font_size",13)))
+        # Update word count visibility
+        self.stats_label.setVisible(cfg.get("show_word_count", True))
 
     # ─── Stats ────────────────────────────────────────────────────────────────
     def update_stats(self):
